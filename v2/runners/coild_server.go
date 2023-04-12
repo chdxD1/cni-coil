@@ -337,16 +337,27 @@ func (s *coildServer) getHook(ctx context.Context, pod *corev1.Pod) (nodenet.Set
 				"failed to get Service "+n.String(), err.Error())
 		}
 
-		// as of k8s 1.19, dual stack Service is alpha and will be re-written
-		// in 1.20.  So, we cannot use dual stack services.
-		svcIP := net.ParseIP(svc.Spec.ClusterIP)
-		if svcIP == nil {
-			return nil, newError(codes.Internal, cnirpc.ErrorCode_INTERNAL,
-				"invalid ClusterIP in Service "+n.String(), svc.Spec.ClusterIP)
+		var ip4 net.IP = nil
+		var ip6 net.IP = nil
+		for _, ip := range svc.Spec.ClusterIPs {
+			clusterIP := net.ParseIP(ip)
+			if clusterIP == nil {
+				return nil, newError(codes.Internal, cnirpc.ErrorCode_INTERNAL,
+					"invalid ClusterIP in Service "+n.String(), svc.Spec.ClusterIP)
+			}
+			if clusterIP.To4() != nil {
+				ip4 = clusterIP
+			} else {
+				ip6 = clusterIP
+			}
 		}
-		var subnets []*net.IPNet
-		if ip4 := svcIP.To4(); ip4 != nil {
-			svcIP = ip4
+		if ip4 == nil && ip6 == nil {
+			return nil, newError(codes.Internal, cnirpc.ErrorCode_INTERNAL,
+				"no IPv4 or IPv6 in Service "+n.String(), svc.Spec.ClusterIP)
+		}
+
+		if ip4 != nil {
+			var subnets []*net.IPNet
 			for _, sn := range eg.Spec.Destinations {
 				_, subnet, err := net.ParseCIDR(sn)
 				if err != nil {
@@ -356,7 +367,12 @@ func (s *coildServer) getHook(ctx context.Context, pod *corev1.Pod) (nodenet.Set
 					subnets = append(subnets, subnet)
 				}
 			}
-		} else {
+			if len(subnets) > 0 {
+				gwlist = append(gwlist, GWNets{Gateway: ip4, Networks: subnets})
+			}
+		}
+		if ip6 != nil {
+			var subnets []*net.IPNet
 			for _, sn := range eg.Spec.Destinations {
 				_, subnet, err := net.ParseCIDR(sn)
 				if err != nil {
@@ -366,10 +382,9 @@ func (s *coildServer) getHook(ctx context.Context, pod *corev1.Pod) (nodenet.Set
 					subnets = append(subnets, subnet)
 				}
 			}
-		}
-
-		if len(subnets) > 0 {
-			gwlist = append(gwlist, GWNets{Gateway: svcIP, Networks: subnets})
+			if len(subnets) > 0 {
+				gwlist = append(gwlist, GWNets{Gateway: ip6, Networks: subnets})
+			}
 		}
 	}
 
